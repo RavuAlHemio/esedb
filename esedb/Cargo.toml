@@ -1,0 +1,8 @@
+[package]
+name = "esedb"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+esedb_macros = { path = "../esedb_macros" }
+from-to-repr = { version = "0.2", features = ["from_to_other"] }

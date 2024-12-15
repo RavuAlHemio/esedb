@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "esedb",
+    "esedb_macros",
+    "esedump",
+]
+resolver = "2"
