@@ -1,5 +1,15 @@
+use std::io::{Cursor, Read};
+use std::mem::size_of;
+
 use esedb_macros::ReadFromAndWriteToBytes;
 use from_to_repr::from_to_other;
+
+use crate::byte_io::{LittleEndianRead, ReadFromBytes};
+use crate::common::DbTime;
+use crate::error::ReadError;
+
+
+pub const HEADER_SIGNATURE: u32 = 0x89ABCDEF;
 
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ReadFromAndWriteToBytes)]
@@ -53,6 +63,16 @@ pub struct Header {
     pub unknown5: [u8; 148],
     pub unknown_flags: u32,
 }
+impl Header {
+    pub fn page_size_as_usize(&self) -> usize {
+        self.page_size.try_into().unwrap()
+    }
+
+    pub fn version_and_revision(&self) -> u64 {
+        (u64::from(self.version) << 32)
+        | u64::from(self.format_revision)
+    }
+}
 
 
 #[derive(Clone, Copy, Debug, ReadFromAndWriteToBytes)]
@@ -61,14 +81,6 @@ pub enum FileType {
     Database = 0,
     StreamingFile = 1,
     Other(u32),
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ReadFromAndWriteToBytes)]
-pub struct DbTime {
-    pub hour: u16,
-    pub minute: u16,
-    pub second: u16,
-    pub padding: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ReadFromAndWriteToBytes)]
@@ -137,4 +149,50 @@ pub struct ErrorStats {
     pub count: u32,
     pub last_timestamp: LogTime,
     pub old_count: u32,
+}
+
+
+pub fn read_header<R: Read>(reader: &mut R) -> Result<Header, ReadError> {
+    // read bytes of the header
+    const HEADER_SIZE: usize = size_of::<Header>();
+
+    let mut header_bytes = vec![0u8; HEADER_SIZE];
+    reader.read_exact(&mut header_bytes)?;
+
+    // check magic (signature)
+    let signature = u32::from_le_bytes(header_bytes[4..8].try_into().unwrap());
+    if signature != HEADER_SIGNATURE {
+        return Err(ReadError::WrongHeaderSignature { expected: HEADER_SIGNATURE, read: signature });
+    }
+
+    // obtain page size
+    let page_size_u32 = u32::from_le_bytes(header_bytes[236..240].try_into().unwrap());
+    let page_size: usize = page_size_u32.try_into().unwrap();
+    if page_size < HEADER_SIZE {
+        return Err(ReadError::HeaderLongerThanPage { header_length: HEADER_SIZE, page_size });
+    }
+    if page_size % 4 != 0 {
+        return Err(ReadError::PageSizeNotDivisibleBy4 { page_size });
+    }
+
+    // read the rest of the page
+    header_bytes.resize(page_size, 0);
+    reader.read_exact(&mut header_bytes[HEADER_SIZE..page_size])?;
+
+    // run the checksum (xor of all u32)
+    let file_checksum = u32::from_le_bytes(header_bytes[0..4].try_into().unwrap());
+    let mut calculated_checksum = 0;
+    for chunk in header_bytes[8..].chunks(4) {
+        let value = u32::from_le_bytes(chunk.try_into().unwrap());
+        calculated_checksum ^= value;
+    }
+    if file_checksum != calculated_checksum {
+        return Err(ReadError::WrongHeaderChecksum { calculated: calculated_checksum, read: file_checksum });
+    }
+
+    // decode the header
+    let cursor = Cursor::new(header_bytes.as_slice());
+    let mut reader = LittleEndianRead::new(cursor);
+    let header = Header::read_from_bytes(&mut reader)?;
+    Ok(header)
 }
