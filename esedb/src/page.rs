@@ -4,7 +4,7 @@ use esedb_macros::ReadFromAndWriteToBytes;
 use from_to_repr::from_to_other;
 
 use crate::bitflags_read_write_bytes;
-use crate::byte_io::{LittleEndianRead, ReadFromBytes, WriteToBytes};
+use crate::byte_io::{ByteRead, LittleEndianRead, ReadFromBytes, WriteToBytes};
 use crate::common::DbTime;
 use crate::error::{ReadError, WriteError};
 use crate::header::Header;
@@ -120,7 +120,7 @@ bitflags_read_write_bytes! {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct PageTagSmall {
+struct PageTagSmall {
     pub value_offset: u16, // u13
     pub flags: PageTagFlags, // u3
     pub value_size: u16, // u13
@@ -171,7 +171,7 @@ impl WriteToBytes for PageTagSmall {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct PageTagLarge {
+struct PageTagLarge {
     pub value_offset: u16, // u15
     pub offset_flag: bool, // u1
     pub value_size: u16, // u15
@@ -214,61 +214,10 @@ impl WriteToBytes for PageTagLarge {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct PageTagGeneral {
+pub struct PageTag {
     pub value_offset: u16,
     pub value_size: u16,
-}
-impl From<PageTagLarge> for PageTagGeneral {
-    fn from(value: PageTagLarge) -> Self {
-        Self {
-            value_offset: value.value_offset,
-            value_size: value.value_size,
-        }
-    }
-}
-impl From<PageTagSmall> for PageTagGeneral {
-    fn from(value: PageTagSmall) -> Self {
-        Self {
-            value_offset: value.value_offset,
-            value_size: value.value_size,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum PageTags {
-    Small(Vec<PageTagSmall>),
-    Large(Vec<PageTagLarge>),
-}
-impl PageTags {
-    pub fn as_small(&self) -> Option<&Vec<PageTagSmall>> {
-        match self {
-            Self::Small(tags) => Some(tags),
-            _ => None,
-        }
-    }
-
-    pub fn as_large(&self) -> Option<&Vec<PageTagLarge>> {
-        match self {
-            Self::Large(tags) => Some(tags),
-            _ => None,
-        }
-    }
-
-    pub fn to_general(&self) -> Vec<PageTagGeneral> {
-        match self {
-            Self::Small(tags) => {
-                tags.iter()
-                    .map(|t| PageTagGeneral::from(*t))
-                    .collect()
-            },
-            Self::Large(tags) => {
-                tags.iter()
-                    .map(|t| PageTagGeneral::from(*t))
-                    .collect()
-            },
-        }
-    }
+    pub flags: PageTagFlags,
 }
 
 bitflags_read_write_bytes! {
@@ -380,7 +329,7 @@ pub fn read_page_header<R: Read + Seek>(reader: &mut R, header: &Header, page_nu
     })
 }
 
-pub fn read_page_tags<R: Read + Seek>(reader: &mut R, header: &Header, page_header: &PageHeader) -> Result<PageTags, ReadError> {
+pub fn read_page_tags<R: Read + Seek>(reader: &mut R, header: &Header, page_header: &PageHeader) -> Result<Vec<PageTag>, ReadError> {
     // tags are at the end of the page => skip to the beginning of the next page minus the tags used
     let tag_count = u64::from(page_header.first_available_page_tag);
     let tag_byte_count = 4 * tag_count;
@@ -391,35 +340,59 @@ pub fn read_page_tags<R: Read + Seek>(reader: &mut R, header: &Header, page_head
     let mut read = LittleEndianRead::new(reader);
 
     let tag_count_usize: usize = tag_count.try_into().unwrap();
-
+    let mut tags = Vec::with_capacity(tag_count_usize);
     if header.page_size <= MAX_SIZE_SMALL_PAGE {
-        // version 2 tags
+        // small tags
+        for _ in 0..tag_count_usize {
+            let tag = PageTagSmall::read_from_bytes(&mut read)?;
+            tags.push(PageTag {
+                value_offset: tag.value_offset,
+                value_size: tag.value_size,
+                flags: tag.flags,
+            });
+        }
+    } else {
+        // large tags
+        // flags are stored in the upper bits of the u16 at the beginning of the data
+        // (you wanted to store your own data in there? haha nope)
+        // if there's less than two bytes of data, the flags are 0
         let mut tags = Vec::with_capacity(tag_count_usize);
         for _ in 0..tag_count_usize {
             let tag = PageTagLarge::read_from_bytes(&mut read)?;
-            tags.push(tag);
+            let flags = if tag.value_size >= 2 {
+                let orig_pos = read.stream_position()?;
+
+                let page_offset = page_byte_offset(header.page_size, page_header.page_number())?;
+                let page_header_length = page_header.size_bytes();
+                let tag_data_offset: u64 = tag.value_offset.into();
+                let tag_data_pos = page_offset + page_header_length + tag_data_offset;
+                read.seek(SeekFrom::Start(tag_data_pos))?;
+                let flags_u16 = read.read_u16()?;
+                // only the top 3 bits count
+                let flags_u3 = u8::try_from((flags_u16 >> 13) & 0b111).unwrap();
+                let flags = PageTagFlags::from_bits_retain(flags_u3);
+
+                read.seek(SeekFrom::Start(orig_pos))?;
+                flags
+            } else {
+                PageTagFlags::empty()
+            };
+            tags.push(PageTag {
+                value_offset: tag.value_offset,
+                value_size: tag.value_size,
+                flags,
+            });
         }
-        tags.reverse();
-        Ok(PageTags::Large(tags))
-    } else {
-        // version 1 tags
-        let mut tags = Vec::with_capacity(tag_count_usize);
-        for _ in 0..tag_count_usize {
-            let tag = PageTagSmall::read_from_bytes(&mut read)?;
-            tags.push(tag);
-        }
-        tags.reverse();
-        Ok(PageTags::Small(tags))
     }
+    tags.reverse();
+    Ok(tags)
 }
 
-pub fn read_data_for_tag<R: Read + Seek, PT: Into<PageTagGeneral>>(reader: &mut R, header: &Header, page_header: &PageHeader, tag: PT) -> Result<Vec<u8>, ReadError> {
-    let my_tag: PageTagGeneral = tag.into();
-
+pub fn read_data_for_tag<R: Read + Seek>(reader: &mut R, header: &Header, page_header: &PageHeader, tag: &PageTag) -> Result<Vec<u8>, ReadError> {
     let page_offset = page_byte_offset(header.page_size, page_header.page_number())?;
     let page_header_size = page_header.size_bytes();
-    let tag_offset: u64 = my_tag.value_offset.into();
-    let tag_length: usize = my_tag.value_size.into();
+    let tag_offset: u64 = tag.value_offset.into();
+    let tag_length: usize = tag.value_size.into();
 
     reader.seek(SeekFrom::Start(page_offset + page_header_size + tag_offset))?;
 

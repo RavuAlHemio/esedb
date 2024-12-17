@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 
 
 pub trait ByteRead {
@@ -145,6 +145,12 @@ impl<R: Read> ByteRead for LittleEndianRead<R> {
     impl_read!(read_isize, isize);
     impl_read!(read_f32, f32, 4);
     impl_read!(read_f64, f64, 8);
+}
+
+impl<R: Read + Seek> Seek for LittleEndianRead<R> {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        self.reader.seek(pos)
+    }
 }
 
 pub struct LittleEndianWrite<W: Write> {

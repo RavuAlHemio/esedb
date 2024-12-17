@@ -30,11 +30,10 @@ fn main() {
     println!("{:#?}", page_1_header);
 
     let page_1_tags = read_page_tags(&mut file, &header, &page_1_header)
-        .expect("failed to read page 1 tags")
-        .to_general();
+        .expect("failed to read page 1 tags");
     println!("{:#?}", page_1_tags);
 
-    let root_page_header_data = read_data_for_tag(&mut file, &header, &page_1_header, page_1_tags[0])
+    let root_page_header_data = read_data_for_tag(&mut file, &header, &page_1_header, &page_1_tags[0])
         .expect("failed to read root page header data");
     let root_page_header = read_root_page_header(&root_page_header_data)
         .expect("failed to parse root page header");
@@ -49,8 +48,8 @@ fn main() {
         .expect("failed to read space page tags");
     println!("{:#?}", space_page_tags);
 
-    for space_page_tag in &space_page_tags.to_general() {
-        let space_tag_data = read_data_for_tag(&mut file, &header, &space_page_header, *space_page_tag)
+    for space_page_tag in &space_page_tags {
+        let space_tag_data = read_data_for_tag(&mut file, &header, &space_page_header, space_page_tag)
             .expect("failed to read data");
         println!("{:#?}", space_tag_data);
     }
