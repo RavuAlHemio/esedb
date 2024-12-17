@@ -356,10 +356,11 @@ pub fn read_page_tags<R: Read + Seek>(reader: &mut R, header: &Header, page_head
         // flags are stored in the upper bits of the u16 at the beginning of the data
         // (you wanted to store your own data in there? haha nope)
         // if there's less than two bytes of data, the flags are 0
+        // the flags are also always 0 for the first tag
         let mut tags = Vec::with_capacity(tag_count_usize);
-        for _ in 0..tag_count_usize {
+        for tag_index in 0..tag_count_usize {
             let tag = PageTagLarge::read_from_bytes(&mut read)?;
-            let flags = if tag.value_size >= 2 {
+            let flags = if tag_index > 0 && tag.value_size >= 2 {
                 let orig_pos = read.stream_position()?;
 
                 let page_offset = page_byte_offset(header.page_size, page_header.page_number())?;
