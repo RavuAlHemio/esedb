@@ -506,6 +506,61 @@ pub fn read_data_for_tag<R: Read + Seek>(reader: &mut R, page_size: u32, page_he
     Ok(buf)
 }
 
+#[instrument(skip(reader, header), fields(header.page_number, header.version, header.revision))]
+pub fn read_data_from_tree<R: Read + Seek>(
+    reader: &mut R,
+    header: &Header,
+    page_number: u64,
+    skip_first: usize,
+    take_max: usize,
+    values: &mut Vec<Vec<u8>>,
+    skip_index: &mut usize,
+) -> Result<(), ReadError> {
+    if values.len() >= take_max {
+        return Ok(());
+    }
+
+    let page_header = read_page_header(reader, &header, page_number)?;
+    trace!(?page_header);
+    let page_tags = read_page_tags(reader, header.page_size, &page_header)?;
+    trace!(?page_tags);
+
+    for (tag_index, page_tag) in page_tags.iter().enumerate() {
+        if values.len() >= take_max {
+            return Ok(());
+        }
+
+        if tag_index == 0 {
+            // page header
+            continue;
+        }
+
+        let data = read_page_entry(reader, header.page_size, &page_header, page_tag)?;
+        trace!(tag_index, page_entry = ?data);
+        if let Some(branch) = data.as_branch() {
+            // descend
+            read_data_from_tree(
+                reader,
+                header,
+                branch.child_page_number.into(),
+                skip_first,
+                take_max,
+                values,
+                skip_index,
+            )?;
+        } else if let PageEntry::Leaf(leaf) = data {
+            trace!(?leaf.entry_data);
+            if *skip_index < skip_first {
+                *skip_index += 1;
+            } else {
+                values.push(leaf.entry_data);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[instrument(skip(reader))]
 pub fn read_page_entry<R: Read + Seek>(reader: &mut R, page_size: u32, page_header: &PageHeader, tag: &PageTag) -> Result<PageEntry, ReadError> {
     let mut data = read_data_for_tag(reader, page_size, page_header, tag)?;

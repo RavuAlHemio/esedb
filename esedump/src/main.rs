@@ -53,8 +53,7 @@ fn main() {
     }
 
     // read the catalog of objects
-    let mut naive_rows = Vec::new();
-    read_table_from_pages(&mut file, &header, CATALOG_PAGE_NUMBER, &*esedb::table::METADATA_COLUMN_DEFS, &mut naive_rows)
+    let naive_rows = read_table_from_pages(&mut file, &header, CATALOG_PAGE_NUMBER, &*esedb::table::METADATA_COLUMN_DEFS, None)
         .expect("failed to read metadata table from pages");
     let naive_tables = collect_tables(&naive_rows, &*esedb::table::METADATA_COLUMN_DEFS)
         .expect("failed to collect tables");
@@ -65,8 +64,7 @@ fn main() {
         .expect("MSysObjects table not found");
 
     // re-read the metadata given this definition
-    let mut meta_rows = Vec::new();
-    read_table_from_pages(&mut file, &header, mso.header.fdp_page_number.try_into().unwrap(), &mso.columns, &mut meta_rows)
+    let meta_rows = read_table_from_pages(&mut file, &header, mso.header.fdp_page_number.try_into().unwrap(), &mso.columns, mso.long_value_page_number())
         .expect("failed to read metadata table from pages");
     let tables = collect_tables(&meta_rows, &mso.columns)
         .expect("failed to collect tables");
@@ -95,8 +93,7 @@ fn main() {
                 .find(|t| t.header.name == dump_table_opts.table)
                 .expect("requested table not found");
 
-            let mut rows = Vec::new();
-            read_table_from_pages(&mut file, &header, table.header.fdp_page_number.try_into().unwrap(), &table.columns, &mut rows)
+            let rows = read_table_from_pages(&mut file, &header, table.header.fdp_page_number.try_into().unwrap(), &table.columns, table.long_value_page_number())
                 .expect("failed to read data rows");
             for row in &rows {
                 println!("---");

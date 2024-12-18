@@ -22,6 +22,7 @@ pub enum ReadError {
     MissingRequiredColumn { name: Cow<'static, str> },
     WrongColumnType { name: Cow<'static, str>, expected: DataType, obtained: DataType },
     WrongObjectType { expected: ObjectType, obtained: ObjectType },
+    SeparatedValueWithoutLongValueInfo,
 }
 impl ReadError {
     #[must_use]
@@ -73,6 +74,8 @@ impl fmt::Display for ReadError {
                 => write!(f, "column {:?} has data type {:?}, expected {:?}", &*name, obtained, expected),
             Self::WrongObjectType { expected, obtained }
                 => write!(f, "object has type {:?}, expected {:?}", obtained, expected),
+            Self::SeparatedValueWithoutLongValueInfo
+                => write!(f, "table contains a separated value but no long value info"),
         }
     }
 }
@@ -93,6 +96,7 @@ impl std::error::Error for ReadError {
             Self::MissingRequiredColumn { .. } => None,
             Self::WrongColumnType { .. } => None,
             Self::WrongObjectType { .. } => None,
+            Self::SeparatedValueWithoutLongValueInfo => None,
         }
     }
 }

@@ -13,7 +13,7 @@ use crate::byte_io::{ByteRead, LittleEndianRead};
 use crate::data::{Bit, Data, DataType};
 use crate::error::ReadError;
 use crate::header::Header;
-use crate::page::{read_page_entry, read_page_header, read_page_tags, PageEntry, MAX_SIZE_SMALL_PAGE};
+use crate::page::{MAX_SIZE_SMALL_PAGE, read_data_from_tree};
 
 
 // here we have a bit of a bootstrapping issue
@@ -257,10 +257,57 @@ impl Index {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LongValueInfo {
+    pub table_object_id: i32,
+    pub long_value_id: i32,
+    pub fdp_page_number: i32,
+    pub used_pages: i32,
+    pub flags: ObjectFlags,
+    pub page_count: i32,
+    pub name: String,
+}
+impl LongValueInfo {
+    #[instrument]
+    pub fn try_from_metadata(column_defs: &[Column], values: &BTreeMap<i32, Value>) -> Result<Self, ReadError> {
+        let name_to_column = get_name_to_column(column_defs);
+
+        let type_value_i16 = *get_value!(@required, name_to_column, values, "Type", Short);
+        let type_value = ObjectType::from_base_type(type_value_i16);
+        ReadError::ensure_object_type(ObjectType::LongValue, type_value)?;
+
+        let table_object_id = *get_value!(@required, name_to_column, values, "ObjidTable", Long);
+        let long_value_id = *get_value!(@required, name_to_column, values, "Id", Long);
+        let fdp_page_number = *get_value!(@required, name_to_column, values, "ColtypOrPgnoFDP", Long);
+        let used_pages = *get_value!(@required, name_to_column, values, "SpaceUsage", Long);
+        let flags_i32 = *get_value!(@required, name_to_column, values, "Flags", Long);
+        let flags = ObjectFlags::from_bits_retain(flags_i32);
+        let page_count = *get_value!(@required, name_to_column, values, "PagesOrLocale", Long);
+        let name = get_value!(@required, name_to_column, values, "Name", Text);
+
+        Ok(LongValueInfo {
+            table_object_id,
+            long_value_id,
+            fdp_page_number,
+            used_pages,
+            flags,
+            page_count,
+            name: name.clone(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Table {
     pub header: TableHeader,
     pub columns: Vec<Column>,
     pub indexes: Vec<Index>,
+    pub long_value: Option<LongValueInfo>,
+}
+impl Table {
+    pub fn long_value_page_number(&self) -> Option<u64> {
+        self.long_value.as_ref()
+            .map(|lv| lv.fdp_page_number.try_into().unwrap())
+    }
 }
 
 bitflags::bitflags! {
@@ -425,8 +472,26 @@ pub static METADATA_COLUMN_DEFS: LazyLock<[Column; 10]> = LazyLock::new(|| [
 ]);
 
 
-#[instrument]
-pub fn decode_row(row_data: &[u8], columns: &[Column], page_size: u32) -> Result<BTreeMap<i32, Value>, ReadError> {
+fn reference_bytes_to_value_number(bytes: &[u8]) -> usize {
+    let mut page_number = 0;
+    // little-endian encoding, so do Horner scheme in reverse
+    for b in bytes.iter().rev() {
+        page_number *= 256;
+        page_number += usize::from(*b);
+    }
+    page_number
+}
+
+
+#[instrument(skip(reader, header))]
+pub fn decode_row<R: Read + Seek>(
+    reader: &mut R,
+    header: &Header,
+    row_data: &[u8],
+    columns: &[Column],
+    page_size: u32,
+    large_value_page_number: Option<u64>,
+) -> Result<BTreeMap<i32, Value>, ReadError> {
     let mut sorted_columns: Vec<&Column> = columns.iter().collect();
     sorted_columns.sort_unstable_by_key(|c| c.column_id);
 
@@ -726,12 +791,56 @@ pub fn decode_row(row_data: &[u8], columns: &[Column], page_size: u32) -> Result
                         values.push(Data::Currency(inner_value));
                     },
                     DataType::LongText => {
-                        let inner_value = decode_string(value_slice, column.codepage);
-                        values.push(Data::LongText(inner_value));
+                        if flags.contains(TagFlags::SEPARATED) {
+                            // the data is stored in a different page
+                            let Some(sep_page_number) = large_value_page_number else {
+                                return Err(ReadError::SeparatedValueWithoutLongValueInfo)
+                            };
+                            let value_number = reference_bytes_to_value_number(value_slice);
+                            let mut separated_values = Vec::new();
+                            let mut skip_index = 0;
+                            read_data_from_tree(
+                                reader,
+                                header,
+                                sep_page_number,
+                                value_number,
+                                1,
+                                &mut separated_values,
+                                &mut skip_index,
+                            )?;
+                            for separated_value in separated_values {
+                                let separated_string = decode_string(&separated_value, column.codepage);
+                                values.push(Data::LongText(separated_string));
+                            }
+                        } else {
+                            let inner_value = decode_string(value_slice, column.codepage);
+                            values.push(Data::LongText(inner_value));
+                        }
                     },
                     DataType::LongBinary => {
-                        let inner_value = value_slice.to_vec();
-                        values.push(Data::LongBinary(inner_value));
+                        if flags.contains(TagFlags::SEPARATED) {
+                            let Some(sep_page_number) = large_value_page_number else {
+                                return Err(ReadError::SeparatedValueWithoutLongValueInfo)
+                            };
+                            let value_number = reference_bytes_to_value_number(value_slice);
+                            let mut separated_values = Vec::new();
+                            let mut skip_index = 0;
+                            read_data_from_tree(
+                                reader,
+                                header,
+                                sep_page_number,
+                                value_number,
+                                1,
+                                &mut separated_values,
+                                &mut skip_index,
+                            )?;
+                            for separated_value in separated_values {
+                                values.push(Data::LongBinary(separated_value));
+                            }
+                        } else {
+                            let inner_value = value_slice.to_vec();
+                            values.push(Data::LongBinary(inner_value));
+                        }
                     },
                     other => {
                         return Err(ReadError::UnexpectedTaggedColumnDataType {
@@ -741,6 +850,10 @@ pub fn decode_row(row_data: &[u8], columns: &[Column], page_size: u32) -> Result
                         });
                     },
                 }
+            }
+
+            if flags.contains(TagFlags::SEPARATED) && column.column_type != DataType::LongText && column.column_type != DataType::LongBinary {
+                panic!("unexpected data type for SEPARATED");
             }
 
             if values.len() == 1 {
@@ -805,32 +918,26 @@ fn get_name_to_column(columns: &[Column]) -> BTreeMap<&str, &Column> {
         .collect()
 }
 
-#[instrument(skip(reader, header, rows), fields(header.page_number, header.version, header.revision))]
-pub fn read_table_from_pages<R: Read + Seek>(reader: &mut R, header: &Header, page_number: u64, columns: &[Column], rows: &mut Vec<BTreeMap<i32, Value>>) -> Result<(), ReadError> {
-    let page_header = read_page_header(reader, &header, page_number)?;
-    trace!(?page_header);
-    let page_tags = read_page_tags(reader, header.page_size, &page_header)?;
-    trace!(?page_tags);
+#[instrument(skip(reader, header), fields(header.page_number, header.version, header.revision))]
+pub fn read_table_from_pages<R: Read + Seek>(
+    reader: &mut R,
+    header: &Header,
+    page_number: u64,
+    columns: &[Column],
+    large_value_page_number: Option<u64>,
+) -> Result<Vec<BTreeMap<i32, Value>>, ReadError> {
+    let mut raw_rows = Vec::new();
+    let mut skip_index = 0;
+    read_data_from_tree(reader, header, page_number, 0, usize::MAX, &mut raw_rows, &mut skip_index)?;
 
-    for (tag_index, page_tag) in page_tags.iter().enumerate() {
-        if tag_index == 0 {
-            // page header
-            continue;
-        }
-
-        let data = read_page_entry(reader, header.page_size, &page_header, page_tag)?;
-        trace!(tag_index, page_entry = ?data);
-        if let Some(branch) = data.as_branch() {
-            // descend
-            read_table_from_pages(reader, header, branch.child_page_number.into(), columns, rows)?;
-        } else if let PageEntry::Leaf(leaf) = data {
-            let row = decode_row(&leaf.entry_data, columns, header.page_size)?;
-            trace!(?row);
-            rows.push(row);
-        }
+    let mut rows = Vec::with_capacity(raw_rows.len());
+    for raw_row in raw_rows {
+        let row = decode_row(reader, header, &raw_row, columns, header.page_size, large_value_page_number)?;
+        trace!(?row);
+        rows.push(row);
     }
 
-    Ok(())
+    Ok(rows)
 }
 
 #[instrument]
@@ -840,7 +947,7 @@ pub fn collect_tables(rows: &[BTreeMap<i32, Value>], metadata_columns: &[Column]
     let mut table_number_to_header: BTreeMap<i32, TableHeader> = BTreeMap::new();
     let mut table_number_to_columns: BTreeMap<i32, Vec<Column>> = BTreeMap::new();
     let mut table_number_to_indexes: BTreeMap<i32, Vec<Index>> = BTreeMap::new();
-    // TODO: long data
+    let mut table_number_to_long_value: BTreeMap<i32, LongValueInfo> = BTreeMap::new();
 
     for row in rows {
         let type_value_i16 = *get_value!(@required, name_to_column, row, "Type", Short);
@@ -864,6 +971,10 @@ pub fn collect_tables(rows: &[BTreeMap<i32, Value>], metadata_columns: &[Column]
                     .or_insert_with(|| Vec::new())
                     .push(index);
             },
+            ObjectType::LongValue => {
+                let long_value = LongValueInfo::try_from_metadata(metadata_columns, row)?;
+                table_number_to_long_value.insert(long_value.table_object_id, long_value);
+            },
             _ => {
                 // currently unhandled...
             },
@@ -883,10 +994,12 @@ pub fn collect_tables(rows: &[BTreeMap<i32, Value>], metadata_columns: &[Column]
             .unwrap_or_else(|| Vec::with_capacity(0));
         let indexes = table_number_to_indexes.remove(&header.table_object_id)
             .unwrap_or_else(|| Vec::with_capacity(0));
+        let long_value = table_number_to_long_value.remove(&header.table_object_id);
         tables.push(Table {
             header,
             columns,
             indexes,
+            long_value,
         });
     }
 
