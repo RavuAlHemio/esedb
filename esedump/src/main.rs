@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use esedb::header::read_header;
+use esedb::page::CATALOG_PAGE_NUMBER;
 use esedb::table::{collect_tables, read_table_from_pages};
 
 
@@ -31,9 +32,9 @@ fn main() {
         println!("warning: shadow header mismatch");
     }
 
-    // page 4 contains the catalog of objects
+    // read the catalog of objects
     let mut naive_rows = Vec::new();
-    read_table_from_pages(&mut file, &header, 4, &*esedb::table::METADATA_COLUMN_DEFS, &mut naive_rows)
+    read_table_from_pages(&mut file, &header, CATALOG_PAGE_NUMBER, &*esedb::table::METADATA_COLUMN_DEFS, &mut naive_rows)
         .expect("failed to read metadata table from pages");
     let naive_tables = collect_tables(&naive_rows, &*esedb::table::METADATA_COLUMN_DEFS)
         .expect("failed to collect tables");

@@ -16,6 +16,10 @@ use crate::header::Header;
 pub(crate) const MAX_SIZE_SMALL_PAGE: u32 = 1024 * 8;
 
 
+/// The number of the page containing the catalog (database metadata).
+pub const CATALOG_PAGE_NUMBER: u64 = 4;
+
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PageHeader {
     pub checksum_and_page_number: ChecksumAndPageNumber,
