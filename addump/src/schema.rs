@@ -15,8 +15,9 @@ use esedb::table::{Table, Value};
 // * the object class of the schema root is 196617 (1.2.840.113556.1.3.9 dMD)
 // * the naming attribute for the top objects is ATTm589825
 //   (encoding=2.5.5.12=String(Unicode) attribute=1.2.840.113556.1.4.1 name)
-// * there are only two instances of this object
-// * one of the instances is $ROOT_OBJECT$ -> Boot -> Schema, which we are not interested in
+// * there are up to two instances of this object
+// * if there are two, one of the instances is $ROOT_OBJECT$ -> Boot -> Schema,
+//   which we are not interested in
 //
 // we make further assumptions when decoding the schema:
 // * attributes and classes are immediate children of the schema root
@@ -104,20 +105,24 @@ pub fn find_schema_root<'t, 'r>(data_table: &'t Table, data_rows: &'r [BTreeMap<
         .column_id;
 
     // find Boot
-    let boot_entry = data_rows.iter()
+    let boot_entry_opt = data_rows.iter()
         .find(|row|
             column_contains_value(row, parent_dnt_column_index, &Data::Long(ROOT_OBJECT_DNT))
             && column_contains_value(row, top_name_column_index, &Data::LongText(BOOT_OBJECT_NAME.to_owned()))
-        )
-        .expect("failed to find Boot entry");
-    let boot_dnt_value = boot_entry.get(&dnt_column_index)
-        .expect("Boot entry has no DNT?!");
-    let boot_dnt = extract_dnt(boot_dnt_value);
+        );
+    let boot_dnt_opt = if let Some(boot_entry) = boot_entry_opt {
+        let boot_dnt_value = boot_entry.get(&dnt_column_index)
+            .expect("Boot entry has no DNT?!");
+        Some(extract_dnt(boot_dnt_value))
+    } else {
+        None
+    };
 
     // find schema root that is not a child of Boot
     let schema_root = data_rows.iter()
         .find(|row|
-            !column_contains_value(row, parent_dnt_column_index, &Data::Long(boot_dnt))
+            boot_dnt_opt.map(|boot_dnt| !column_contains_value(row, parent_dnt_column_index, &Data::Long(boot_dnt)))
+                .unwrap_or(true)
             && column_contains_value(row, object_class_column_index, &Data::Long(SCHEMA_ROOT_OBJECT_CLASS))
         )
         .expect("schema root not found");
