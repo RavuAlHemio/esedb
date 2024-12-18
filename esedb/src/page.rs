@@ -549,7 +549,25 @@ pub fn read_page_entry<R: Read + Seek>(reader: &mut R, page_size: u32, page_head
     };
 
     // what sort of entry is this?
-    if page_header.flags.contains(PageFlags::ROOT_PAGE) {
+    if page_header.flags.contains(PageFlags::LEAF_PAGE) {
+        if page_header.flags.contains(PageFlags::SPACE_TREE_PAGE) {
+            let number_of_pages = read.read_u32()?;
+            Ok(PageEntry::SpaceLeaf(SpaceLeafPageEntry {
+                common,
+                number_of_pages,
+            }))
+        } else if page_header.flags.contains(PageFlags::INDEX_PAGE) {
+            // we handled this before (because it has no common block)
+            unreachable!();
+        } else {
+            let mut entry_data = Vec::with_capacity(data.len());
+            read.read_to_end(&mut entry_data)?;
+            Ok(PageEntry::Leaf(LeafPageEntry {
+                common,
+                entry_data,
+            }))
+        }
+    } else if page_header.flags.contains(PageFlags::ROOT_PAGE) {
         let child_page_number = read.read_u32()?;
         let entry = BranchPageEntry {
             common,
@@ -568,24 +586,6 @@ pub fn read_page_entry<R: Read + Seek>(reader: &mut R, page_size: u32, page_head
             Ok(PageEntry::IndexBranch(entry))
         } else {
             Ok(PageEntry::Branch(entry))
-        }
-    } else if page_header.flags.contains(PageFlags::LEAF_PAGE) {
-        if page_header.flags.contains(PageFlags::SPACE_TREE_PAGE) {
-            let number_of_pages = read.read_u32()?;
-            Ok(PageEntry::SpaceLeaf(SpaceLeafPageEntry {
-                common,
-                number_of_pages,
-            }))
-        } else if page_header.flags.contains(PageFlags::INDEX_PAGE) {
-            // we handled this before (because it has no common block)
-            unreachable!();
-        } else {
-            let mut entry_data = Vec::with_capacity(data.len());
-            read.read_to_end(&mut entry_data)?;
-            Ok(PageEntry::Leaf(LeafPageEntry {
-                common,
-                entry_data,
-            }))
         }
     } else {
         Err(ReadError::UnknownPageType)
