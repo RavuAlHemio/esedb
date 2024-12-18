@@ -356,6 +356,15 @@ pub enum Value {
         flags: TagFlags,
     },
 }
+impl Value {
+    pub fn to_data_vec(&self) -> Vec<&Data> {
+        match self {
+            Value::Simple(data) => vec![data],
+            Value::Complex { data, .. } => vec![data],
+            Value::Multiple { values, ..} => values.iter().collect(),
+        }
+    }
+}
 
 
 pub static METADATA_COLUMN_DEFS: LazyLock<[Column; 10]> = LazyLock::new(|| [

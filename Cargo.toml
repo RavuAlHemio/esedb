@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "addump",
     "esedb",
     "esedb_macros",
     "esedump",
