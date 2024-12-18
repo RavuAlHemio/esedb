@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use esedb::header::read_header;
@@ -8,8 +8,28 @@ use esedb::table::{collect_tables, read_table_from_pages};
 
 
 #[derive(Parser)]
-struct Opts {
+enum Opts {
+    Tables(TablesOpts),
+    DumpTable(DumpTableOpts),
+}
+impl Opts {
+    pub fn db_path(&self) -> &Path {
+        match self {
+            Self::Tables(to) => to.db_path.as_path(),
+            Self::DumpTable(dto) => dto.db_path.as_path(),
+        }
+    }
+}
+
+#[derive(Parser)]
+struct TablesOpts {
     pub db_path: PathBuf,
+}
+
+#[derive(Parser)]
+struct DumpTableOpts {
+    pub db_path: PathBuf,
+    pub table: String,
 }
 
 
@@ -22,7 +42,7 @@ fn main() {
         .init();
 
     let opts = Opts::parse();
-    let mut file = File::open(&opts.db_path)
+    let mut file = File::open(opts.db_path())
         .expect("failed to open database file");
     let header = read_header(&mut file)
         .expect("failed to read database header");
@@ -51,21 +71,40 @@ fn main() {
     let tables = collect_tables(&meta_rows, &mso.columns)
         .expect("failed to collect tables");
 
-    // find datatable
-    let d8a = tables.iter()
-        .find(|t| t.header.name == "datatable")
-        .expect("datatable not found");
+    match opts {
+        Opts::Tables(_tables_opts) => {
+            for table in &tables {
+                println!("table {:?} ({})", table.header.name, table.header.table_object_id);
+                println!("  flags {:?}", table.header.flags);
+                for column in &table.columns {
+                    println!("  column {:?} ({})", column.name, column.column_id);
+                    println!("    flags {:?}", column.flags);
+                    println!("    type {:?}", column.column_type);
+                    println!("    length {}", column.length);
+                    println!("    codepage {}", column.codepage);
+                }
+                for index in &table.indexes {
+                    println!("  index {:?} ({})", index.name, index.index_id);
+                    println!("    flags {:?}", index.flags);
+                }
+            }
+        },
+        Opts::DumpTable(dump_table_opts) => {
+            // find table
+            let table = tables.iter()
+                .find(|t| t.header.name == dump_table_opts.table)
+                .expect("requested table not found");
 
-    // read it
-    let mut d8a_rows = Vec::new();
-    read_table_from_pages(&mut file, &header, d8a.header.fdp_page_number.try_into().unwrap(), &d8a.columns, &mut d8a_rows)
-        .expect("failed to read data rows");
-
-    for row in &d8a_rows {
-        println!("---");
-        for column in &d8a.columns {
-            let Some(value) = row.get(&column.column_id) else { continue };
-            println!("{}={:?}", column.name, value);
-        }
+            let mut rows = Vec::new();
+            read_table_from_pages(&mut file, &header, table.header.fdp_page_number.try_into().unwrap(), &table.columns, &mut rows)
+                .expect("failed to read data rows");
+            for row in &rows {
+                println!("---");
+                for column in &table.columns {
+                    let Some(value) = row.get(&column.column_id) else { continue };
+                    println!("{}={:?}", column.name, value);
+                }
+            }
+        },
     }
 }
