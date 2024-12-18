@@ -6,6 +6,7 @@ use std::sync::LazyLock;
 use bitflags::bitflags;
 use encoding_rs::DecoderResult;
 use from_to_repr::from_to_other;
+use tracing::{instrument, trace};
 use uuid::Uuid;
 
 use crate::byte_io::{ByteRead, LittleEndianRead};
@@ -131,6 +132,7 @@ pub struct TableHeader {
     pub name: String,
 }
 impl TableHeader {
+    #[instrument]
     pub fn try_from_metadata(column_defs: &[Column], values: &BTreeMap<i32, Value>) -> Result<Self, ReadError> {
         let name_to_column = get_name_to_column(column_defs);
 
@@ -174,6 +176,7 @@ pub struct Column {
     pub name: String,
 }
 impl Column {
+    #[instrument]
     pub fn try_from_metadata(column_defs: &[Column], values: &BTreeMap<i32, Value>) -> Result<Self, ReadError> {
         let name_to_column = get_name_to_column(column_defs);
 
@@ -220,6 +223,7 @@ pub struct Index {
     pub name: String,
 }
 impl Index {
+    #[instrument]
     pub fn try_from_metadata(column_defs: &[Column], values: &BTreeMap<i32, Value>) -> Result<Self, ReadError> {
         let name_to_column = get_name_to_column(column_defs);
 
@@ -421,6 +425,7 @@ pub static METADATA_COLUMN_DEFS: LazyLock<[Column; 10]> = LazyLock::new(|| [
 ]);
 
 
+#[instrument]
 pub fn decode_row(row_data: &[u8], columns: &[Column], page_size: u32) -> Result<BTreeMap<i32, Value>, ReadError> {
     let mut sorted_columns: Vec<&Column> = columns.iter().collect();
     sorted_columns.sort_unstable_by_key(|c| c.column_id);
@@ -755,6 +760,7 @@ pub fn decode_row(row_data: &[u8], columns: &[Column], page_size: u32) -> Result
     Ok(ret)
 }
 
+#[instrument]
 fn decode_string(bytes: &[u8], codepage: i32) -> String {
     if codepage == 1200 {
         // UTF-16LE
@@ -799,9 +805,12 @@ fn get_name_to_column(columns: &[Column]) -> BTreeMap<&str, &Column> {
         .collect()
 }
 
+#[instrument(skip(reader, header, rows), fields(header.page_number, header.version, header.revision))]
 pub fn read_table_from_pages<R: Read + Seek>(reader: &mut R, header: &Header, page_number: u64, columns: &[Column], rows: &mut Vec<BTreeMap<i32, Value>>) -> Result<(), ReadError> {
     let page_header = read_page_header(reader, &header, page_number)?;
-    let page_tags = read_page_tags(reader, &header, &page_header)?;
+    trace!(?page_header);
+    let page_tags = read_page_tags(reader, header.page_size, &page_header)?;
+    trace!(?page_tags);
 
     for (tag_index, page_tag) in page_tags.iter().enumerate() {
         if tag_index == 0 {
@@ -809,12 +818,14 @@ pub fn read_table_from_pages<R: Read + Seek>(reader: &mut R, header: &Header, pa
             continue;
         }
 
-        let data = read_page_entry(reader, &header, &page_header, page_tag)?;
+        let data = read_page_entry(reader, header.page_size, &page_header, page_tag)?;
+        trace!(tag_index, page_entry = ?data);
         if let Some(branch) = data.as_branch() {
             // descend
             read_table_from_pages(reader, header, branch.child_page_number.into(), columns, rows)?;
         } else if let PageEntry::Leaf(leaf) = data {
             let row = decode_row(&leaf.entry_data, columns, header.page_size)?;
+            trace!(?row);
             rows.push(row);
         }
     }
@@ -822,6 +833,7 @@ pub fn read_table_from_pages<R: Read + Seek>(reader: &mut R, header: &Header, pa
     Ok(())
 }
 
+#[instrument]
 pub fn collect_tables(rows: &[BTreeMap<i32, Value>], metadata_columns: &[Column]) -> Result<Vec<Table>, ReadError> {
     let name_to_column = get_name_to_column(metadata_columns);
 

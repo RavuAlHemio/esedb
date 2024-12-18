@@ -13,6 +13,13 @@ struct Opts {
 
 
 fn main() {
+    // set up logging/tracing
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stdout)
+        .pretty()
+        .init();
+
     let opts = Opts::parse();
     let mut file = File::open(&opts.db_path)
         .expect("failed to open database file");

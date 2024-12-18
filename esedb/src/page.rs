@@ -2,6 +2,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use esedb_macros::ReadFromAndWriteToBytes;
 use from_to_repr::from_to_other;
+use tracing::{instrument, trace};
 
 use crate::bitflags_read_write_bytes;
 use crate::byte_io::{ByteRead, LittleEndianRead, ReadFromBytes, WriteToBytes};
@@ -370,13 +371,16 @@ pub fn page_tag_data_offset(page_size: u32, page_number: u64, page_header_size: 
     Ok(page_offset + page_header_size + u64::from(tag_value_offset))
 }
 
+#[instrument(skip(reader, header), fields(header.page_size, header.version, header.revision))]
 pub fn read_page_header<R: Read + Seek>(reader: &mut R, header: &Header, page_number: u64) -> Result<PageHeader, ReadError> {
     let byte_offset = page_byte_offset(header.page_size, page_number)?;
+    trace!(byte_offset);
     reader.seek(SeekFrom::Start(byte_offset))?;
 
     // read raw page header
     let mut read = LittleEndianRead::new(reader);
     let raw_header = RawPageHeader::read_from_bytes(&mut read)?;
+    trace!(?raw_header);
     let checksum_and_page_number = if raw_header.flags.contains(PageFlags::NEW_CHECKSUM_FORMAT) {
         let extended_header = if header.page_size <= MAX_SIZE_SMALL_PAGE {
             // with the new checksum format, the page number is stored nowhere directly, but we still need it
@@ -386,6 +390,8 @@ pub fn read_page_header<R: Read + Seek>(reader: &mut R, header: &Header, page_nu
             let eh = ExtendedPageHeader::read_from_bytes(&mut read)?;
             ExtendedPageHeaderOrPageNumber::ExtendedPageHeader(eh)
         };
+        trace!(?extended_header);
+
         if header.version_and_revision() >= 0x0000_0620_0000_0011 {
             ChecksumAndPageNumber::V3 { checksum: raw_header.checksum_and_page_number_value, extended_header }
         } else {
@@ -398,6 +404,7 @@ pub fn read_page_header<R: Read + Seek>(reader: &mut R, header: &Header, page_nu
         let page_number: u32 = ((raw_header.checksum_and_page_number_value >> 32) & 0xFFFF_FFFF).try_into().unwrap();
         ChecksumAndPageNumber::V1 { xor_checksum, page_number }
     };
+    trace!(?checksum_and_page_number);
 
     Ok(PageHeader {
         checksum_and_page_number,
@@ -413,19 +420,22 @@ pub fn read_page_header<R: Read + Seek>(reader: &mut R, header: &Header, page_nu
     })
 }
 
-pub fn read_page_tags<R: Read + Seek>(reader: &mut R, header: &Header, page_header: &PageHeader) -> Result<Vec<PageTag>, ReadError> {
+#[instrument(skip(reader))]
+pub fn read_page_tags<R: Read + Seek>(reader: &mut R, page_size: u32, page_header: &PageHeader) -> Result<Vec<PageTag>, ReadError> {
     // tags are at the end of the page => skip to the beginning of the next page minus the tags used
     let tag_count = u64::from(page_header.first_available_page_tag);
     let tag_byte_count = 4 * tag_count;
-    let next_page_byte_offset = page_byte_offset(header.page_size, page_header.page_number() + 1)?;
-    let byte_offset = next_page_byte_offset - tag_byte_count;
-    reader.seek(SeekFrom::Start(byte_offset))?;
+    trace!(tag_count, tag_byte_count);
+    let next_page_byte_offset = page_byte_offset(page_size, page_header.page_number() + 1)?;
+    let tags_byte_offset = next_page_byte_offset - tag_byte_count;
+    trace!(next_page_byte_offset, tags_byte_offset);
+    reader.seek(SeekFrom::Start(tags_byte_offset))?;
 
     let mut read = LittleEndianRead::new(reader);
 
     let tag_count_usize: usize = tag_count.try_into().unwrap();
     let mut tags = Vec::with_capacity(tag_count_usize);
-    if header.page_size <= MAX_SIZE_SMALL_PAGE {
+    if page_size <= MAX_SIZE_SMALL_PAGE {
         // small tags
         for _ in 0..tag_count_usize {
             let tag = PageTagSmall::read_from_bytes(&mut read)?;
@@ -448,7 +458,7 @@ pub fn read_page_tags<R: Read + Seek>(reader: &mut R, header: &Header, page_head
             let flags = if tag_index > 0 && tag.value_size >= 2 {
                 let orig_pos = read.stream_position()?;
 
-                let page_offset = page_byte_offset(header.page_size, page_header.page_number())?;
+                let page_offset = page_byte_offset(page_size, page_header.page_number())?;
                 let page_header_length = page_header.size_bytes();
                 let tag_data_offset: u64 = tag.value_offset.into();
                 let tag_data_pos = page_offset + page_header_length + tag_data_offset;
@@ -475,14 +485,16 @@ pub fn read_page_tags<R: Read + Seek>(reader: &mut R, header: &Header, page_head
     Ok(tags)
 }
 
-pub fn read_data_for_tag<R: Read + Seek>(reader: &mut R, header: &Header, page_header: &PageHeader, tag: &PageTag) -> Result<Vec<u8>, ReadError> {
+#[instrument(skip(reader, page_header), fields(page_header.page_number = page_header.page_number(), page_header.size_bytes = page_header.size_bytes()))]
+pub fn read_data_for_tag<R: Read + Seek>(reader: &mut R, page_size: u32, page_header: &PageHeader, tag: &PageTag) -> Result<Vec<u8>, ReadError> {
     let tag_data_position = page_tag_data_offset(
-        header.page_size,
+        page_size,
         page_header.page_number(),
         page_header.size_bytes(),
         tag.value_offset,
     )?;
     let tag_length: usize = tag.value_size.into();
+    trace!(tag_data_position, tag_length);
 
     reader.seek(SeekFrom::Start(tag_data_position))?;
     let mut buf = vec![0u8; tag_length];
@@ -490,8 +502,10 @@ pub fn read_data_for_tag<R: Read + Seek>(reader: &mut R, header: &Header, page_h
     Ok(buf)
 }
 
-pub fn read_page_entry<R: Read + Seek>(reader: &mut R, header: &Header, page_header: &PageHeader, tag: &PageTag) -> Result<PageEntry, ReadError> {
-    let mut data = read_data_for_tag(reader, header, page_header, tag)?;
+#[instrument(skip(reader))]
+pub fn read_page_entry<R: Read + Seek>(reader: &mut R, page_size: u32, page_header: &PageHeader, tag: &PageTag) -> Result<PageEntry, ReadError> {
+    let mut data = read_data_for_tag(reader, page_size, page_header, tag)?;
+    trace!(page_entry_bytes = ?data, ?page_header.flags);
 
     if data.len() >= 2 && tag.flags_in_data {
         // flags are in the top 3 bits of the second data byte
@@ -516,11 +530,14 @@ pub fn read_page_entry<R: Read + Seek>(reader: &mut R, header: &Header, page_hea
     } else {
         None
     };
+    trace!(?common_page_key_size);
 
     let local_page_key_size = read.read_u16()?;
     let local_page_key_size_usize = usize::from(local_page_key_size);
+    trace!(local_page_key_size);
     let mut local_page_key = vec![0u8; local_page_key_size_usize];
     read.read_exact(&mut local_page_key)?;
+    trace!(?local_page_key);
 
     let common = CommonPageEntry {
         common_page_key_size,

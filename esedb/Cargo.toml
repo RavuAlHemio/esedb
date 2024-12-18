@@ -9,4 +9,5 @@ codepage = { version = "0.1" }
 encoding_rs = { version = "0.8" }
 esedb_macros = { path = "../esedb_macros" }
 from-to-repr = { version = "0.2", features = ["from_to_other"] }
+tracing = { version = "0.1" }
 uuid = { version = "1.11" }
