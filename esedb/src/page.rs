@@ -34,8 +34,8 @@ impl PageHeader {
     pub fn size_bytes(&self) -> u64 {
         match &self.checksum_and_page_number {
             ChecksumAndPageNumber::V1 { .. } => 40,
-            ChecksumAndPageNumber::V2 { .. } => 80,
-            ChecksumAndPageNumber::V3 { .. } => 80,
+            ChecksumAndPageNumber::V2 { extended_header, .. } => extended_header.page_header_size_bytes(),
+            ChecksumAndPageNumber::V3 { extended_header, .. } => extended_header.page_header_size_bytes(),
         }
     }
 }
@@ -49,19 +49,19 @@ pub enum ChecksumAndPageNumber {
     V2 {
         xor_checksum: u32,
         ecc_checksum: u32,
-        extended_header: ExtendedPageHeader,
+        extended_header: ExtendedPageHeaderOrPageNumber,
     },
     V3 {
         checksum: u64,
-        extended_header: ExtendedPageHeader,
+        extended_header: ExtendedPageHeaderOrPageNumber,
     },
 }
 impl ChecksumAndPageNumber {
     pub fn page_number(&self) -> u64 {
         match self {
             Self::V1 { page_number, .. } => (*page_number).into(),
-            Self::V2 { extended_header, .. } => extended_header.page_number,
-            Self::V3 { extended_header, .. } => extended_header.page_number,
+            Self::V2 { extended_header, .. } => extended_header.page_number(),
+            Self::V3 { extended_header, .. } => extended_header.page_number(),
         }
     }
 }
@@ -88,6 +88,27 @@ pub struct ExtendedPageHeader {
     pub extended_checksum_3: u64,
     pub page_number: u64,
     pub unknown: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ExtendedPageHeaderOrPageNumber {
+    ExtendedPageHeader(ExtendedPageHeader),
+    PageNumber(u64),
+}
+impl ExtendedPageHeaderOrPageNumber {
+    pub fn page_number(&self) -> u64 {
+        match self {
+            Self::ExtendedPageHeader(eph) => eph.page_number,
+            Self::PageNumber(pn) => *pn,
+        }
+    }
+
+    pub fn page_header_size_bytes(&self) -> u64 {
+        match self {
+            Self::ExtendedPageHeader(_) => 80,
+            Self::PageNumber(_) => 40,
+        }
+    }
 }
 
 
@@ -357,8 +378,14 @@ pub fn read_page_header<R: Read + Seek>(reader: &mut R, header: &Header, page_nu
     let mut read = LittleEndianRead::new(reader);
     let raw_header = RawPageHeader::read_from_bytes(&mut read)?;
     let checksum_and_page_number = if raw_header.flags.contains(PageFlags::NEW_CHECKSUM_FORMAT) {
-        // longer header
-        let extended_header = ExtendedPageHeader::read_from_bytes(&mut read)?;
+        let extended_header = if header.page_size <= MAX_SIZE_SMALL_PAGE {
+            // with the new checksum format, the page number is stored nowhere directly, but we still need it
+            // just take it from the argument to this function
+            ExtendedPageHeaderOrPageNumber::PageNumber(page_number)
+        } else {
+            let eh = ExtendedPageHeader::read_from_bytes(&mut read)?;
+            ExtendedPageHeaderOrPageNumber::ExtendedPageHeader(eh)
+        };
         if header.version_and_revision() >= 0x0000_0620_0000_0011 {
             ChecksumAndPageNumber::V3 { checksum: raw_header.checksum_and_page_number_value, extended_header }
         } else {
