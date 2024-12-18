@@ -12,7 +12,7 @@ use crate::header::Header;
 
 /// The maximum size of a small page. If the page size is greater than this, page tags switch from
 /// the small to the large format.
-const MAX_SIZE_SMALL_PAGE: u32 = 1024 * 8;
+pub(crate) const MAX_SIZE_SMALL_PAGE: u32 = 1024 * 8;
 
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -218,6 +218,7 @@ pub struct PageTag {
     pub value_offset: u16,
     pub value_size: u16,
     pub flags: PageTagFlags,
+    pub flags_in_data: bool,
 }
 
 bitflags_read_write_bytes! {
@@ -278,6 +279,57 @@ impl RootPageHeader {
     impl_rph_variant!(space_tree_page_number, u32);
 }
 
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CommonPageEntry {
+    pub common_page_key_size: Option<u16>,
+    pub local_page_key: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct BranchPageEntry {
+    pub common: CommonPageEntry,
+    pub child_page_number: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LeafPageEntry {
+    pub common: CommonPageEntry,
+    pub entry_data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SpaceLeafPageEntry {
+    pub common: CommonPageEntry,
+    pub number_of_pages: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct IndexLeafPageEntry {
+    pub record_page_key: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum PageEntry {
+    Root(BranchPageEntry),
+    Branch(BranchPageEntry),
+    Leaf(LeafPageEntry),
+    SpaceBranch(BranchPageEntry),
+    SpaceLeaf(SpaceLeafPageEntry),
+    IndexBranch(BranchPageEntry),
+    IndexLeaf(IndexLeafPageEntry),
+}
+impl PageEntry {
+    pub fn as_branch(&self) -> Option<&BranchPageEntry> {
+        match self {
+            Self::Root(b) => Some(b),
+            Self::Branch(b) => Some(b),
+            Self::SpaceBranch(b) => Some(b),
+            Self::IndexBranch(b) => Some(b),
+            Self::Leaf(_)|Self::SpaceLeaf(_)|Self::IndexLeaf(_) => None,
+        }
+    }
+}
+
 pub fn page_byte_offset(page_size: u32, page_number: u64) -> Result<u64, ReadError> {
     // pages are numbered starting at 1
     // however, the first two pages are header and shadow header
@@ -290,6 +342,11 @@ pub fn page_byte_offset(page_size: u32, page_number: u64) -> Result<u64, ReadErr
     let page_index = page_number + 1;
     let byte_offset = page_index * u64::from(page_size);
     Ok(byte_offset)
+}
+
+pub fn page_tag_data_offset(page_size: u32, page_number: u64, page_header_size: u64, tag_value_offset: u16) -> Result<u64, ReadError> {
+    let page_offset = page_byte_offset(page_size, page_number)?;
+    Ok(page_offset + page_header_size + u64::from(tag_value_offset))
 }
 
 pub fn read_page_header<R: Read + Seek>(reader: &mut R, header: &Header, page_number: u64) -> Result<PageHeader, ReadError> {
@@ -349,6 +406,7 @@ pub fn read_page_tags<R: Read + Seek>(reader: &mut R, header: &Header, page_head
                 value_offset: tag.value_offset,
                 value_size: tag.value_size,
                 flags: tag.flags,
+                flags_in_data: false,
             });
         }
     } else {
@@ -382,6 +440,7 @@ pub fn read_page_tags<R: Read + Seek>(reader: &mut R, header: &Header, page_head
                 value_offset: tag.value_offset,
                 value_size: tag.value_size,
                 flags,
+                flags_in_data: true,
             });
         }
     }
@@ -390,16 +449,99 @@ pub fn read_page_tags<R: Read + Seek>(reader: &mut R, header: &Header, page_head
 }
 
 pub fn read_data_for_tag<R: Read + Seek>(reader: &mut R, header: &Header, page_header: &PageHeader, tag: &PageTag) -> Result<Vec<u8>, ReadError> {
-    let page_offset = page_byte_offset(header.page_size, page_header.page_number())?;
-    let page_header_size = page_header.size_bytes();
-    let tag_offset: u64 = tag.value_offset.into();
+    let tag_data_position = page_tag_data_offset(
+        header.page_size,
+        page_header.page_number(),
+        page_header.size_bytes(),
+        tag.value_offset,
+    )?;
     let tag_length: usize = tag.value_size.into();
 
-    reader.seek(SeekFrom::Start(page_offset + page_header_size + tag_offset))?;
-
+    reader.seek(SeekFrom::Start(tag_data_position))?;
     let mut buf = vec![0u8; tag_length];
     reader.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+pub fn read_page_entry<R: Read + Seek>(reader: &mut R, header: &Header, page_header: &PageHeader, tag: &PageTag) -> Result<PageEntry, ReadError> {
+    let mut data = read_data_for_tag(reader, header, page_header, tag)?;
+
+    if data.len() >= 2 && tag.flags_in_data {
+        // flags are in the top 3 bits of the second data byte
+        // strip them out for our purposes
+        data[1] &= 0b0001_1111;
+    }
+
+    if page_header.flags.contains(PageFlags::LEAF_PAGE | PageFlags::INDEX_PAGE) {
+        // does not have the common key part
+        return Ok(PageEntry::IndexLeaf(IndexLeafPageEntry {
+            record_page_key: data,
+        }))
+    }
+
+    let cursor = Cursor::new(&data);
+    let mut read = LittleEndianRead::new(cursor);
+
+    let common_page_key_size = if tag.flags.contains(PageTagFlags::COMPRESSED) {
+        // starts with common page key size
+        let cpks = read.read_u16()?;
+        Some(cpks)
+    } else {
+        None
+    };
+
+    let local_page_key_size = read.read_u16()?;
+    let local_page_key_size_usize = usize::from(local_page_key_size);
+    let mut local_page_key = vec![0u8; local_page_key_size_usize];
+    read.read_exact(&mut local_page_key)?;
+
+    let common = CommonPageEntry {
+        common_page_key_size,
+        local_page_key,
+    };
+
+    // what sort of entry is this?
+    if page_header.flags.contains(PageFlags::ROOT_PAGE) {
+        let child_page_number = read.read_u32()?;
+        let entry = BranchPageEntry {
+            common,
+            child_page_number,
+        };
+        Ok(PageEntry::Root(entry))
+    } else if page_header.flags.contains(PageFlags::BRANCH_PAGE) {
+        let child_page_number = read.read_u32()?;
+        let entry = BranchPageEntry {
+            common,
+            child_page_number,
+        };
+        if page_header.flags.contains(PageFlags::SPACE_TREE_PAGE) {
+            Ok(PageEntry::SpaceBranch(entry))
+        } else if page_header.flags.contains(PageFlags::INDEX_PAGE) {
+            Ok(PageEntry::IndexBranch(entry))
+        } else {
+            Ok(PageEntry::Branch(entry))
+        }
+    } else if page_header.flags.contains(PageFlags::LEAF_PAGE) {
+        if page_header.flags.contains(PageFlags::SPACE_TREE_PAGE) {
+            let number_of_pages = read.read_u32()?;
+            Ok(PageEntry::SpaceLeaf(SpaceLeafPageEntry {
+                common,
+                number_of_pages,
+            }))
+        } else if page_header.flags.contains(PageFlags::INDEX_PAGE) {
+            // we handled this before (because it has no common block)
+            unreachable!();
+        } else {
+            let mut entry_data = Vec::with_capacity(data.len());
+            read.read_to_end(&mut entry_data)?;
+            Ok(PageEntry::Leaf(LeafPageEntry {
+                common,
+                entry_data,
+            }))
+        }
+    } else {
+        Err(ReadError::UnknownPageType)
+    }
 }
 
 pub fn read_root_page_header(data: &[u8]) -> Result<RootPageHeader, ReadError> {

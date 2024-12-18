@@ -2,6 +2,9 @@ use std::borrow::Cow;
 use std::fmt;
 use std::io;
 
+use crate::data::DataType;
+use crate::table::ObjectType;
+
 
 #[derive(Debug)]
 pub enum ReadError {
@@ -12,6 +15,32 @@ pub enum ReadError {
     PageSizeNotDivisibleBy4 { page_size: usize },
     Page0,
     UnknownFormatVariant,
+    UnknownPageType,
+    UnexpectedFixedColumnDataType { table_id: i32, column_id: i32, data_type: DataType },
+    UnexpectedVariableColumnDataType { table_id: i32, column_id: i32, data_type: DataType },
+    UnexpectedTaggedColumnDataType { table_id: i32, column_id: i32, data_type: DataType },
+    MissingRequiredColumn { name: Cow<'static, str> },
+    WrongColumnType { name: Cow<'static, str>, expected: DataType, obtained: DataType },
+    WrongObjectType { expected: ObjectType, obtained: ObjectType },
+}
+impl ReadError {
+    #[must_use]
+    pub fn ensure_column_type(name: Cow<'static, str>, expected: DataType, obtained: DataType) -> Result<(), Self> {
+        if expected == obtained {
+            Ok(())
+        } else {
+            Err(Self::WrongColumnType { name, expected, obtained })
+        }
+    }
+
+    #[must_use]
+    pub fn ensure_object_type(expected: ObjectType, obtained: ObjectType) -> Result<(), Self> {
+        if expected == obtained {
+            Ok(())
+        } else {
+            Err(Self::WrongObjectType { expected, obtained })
+        }
+    }
 }
 impl fmt::Display for ReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -30,6 +59,20 @@ impl fmt::Display for ReadError {
                 => write!(f, "page 0 does not exist"),
             Self::UnknownFormatVariant
                 => write!(f, "failed to detect format variant"),
+            Self::UnknownPageType
+                => write!(f, "unknown page type"),
+            Self::UnexpectedFixedColumnDataType { table_id, column_id, data_type }
+                => write!(f, "unexpected data type {:?} in table {} fixed column {}", data_type, table_id, column_id),
+            Self::UnexpectedVariableColumnDataType { table_id, column_id, data_type }
+                => write!(f, "unexpected data type {:?} in table {} variable column {}", data_type, table_id, column_id),
+            Self::UnexpectedTaggedColumnDataType { table_id, column_id, data_type }
+                => write!(f, "unexpected data type {:?} in table {} tagged column {}", data_type, table_id, column_id),
+            Self::MissingRequiredColumn { name }
+                => write!(f, "missing required column {:?}", &*name),
+            Self::WrongColumnType { name, expected, obtained }
+                => write!(f, "column {:?} has data type {:?}, expected {:?}", &*name, obtained, expected),
+            Self::WrongObjectType { expected, obtained }
+                => write!(f, "object has type {:?}, expected {:?}", obtained, expected),
         }
     }
 }
@@ -43,6 +86,13 @@ impl std::error::Error for ReadError {
             Self::PageSizeNotDivisibleBy4 { .. } => None,
             Self::Page0 => None,
             Self::UnknownFormatVariant => None,
+            Self::UnknownPageType => None,
+            Self::UnexpectedFixedColumnDataType { .. } => None,
+            Self::UnexpectedVariableColumnDataType { .. } => None,
+            Self::UnexpectedTaggedColumnDataType { .. } => None,
+            Self::MissingRequiredColumn { .. } => None,
+            Self::WrongColumnType { .. } => None,
+            Self::WrongObjectType { .. } => None,
         }
     }
 }

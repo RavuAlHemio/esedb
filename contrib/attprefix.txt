@@ -1,0 +1,25 @@
+https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/7cda533e-d7a4-4aec-a517-91d02ff4a1aa
+
+apparently, there is a correspondence between the attribute suffix letter
+and the attributeSyntax OID 2.5.5.x
+
+the values of attributeSyntax are encoded as the Long 0x0008xxxx corresponding to 2.5.5.xxxx
+e.g. 0x0008000C = 2.5.5.12 (= ATTm)
+
+ATTb = 2.5.5.1 (DS-DN)
+ATTc = 2.5.5.2 (Object-Identifier)
+ATTd = 2.5.5.3 (String(Case))
+ATTe = 2.5.5.4 (String(Teletex))
+ATTf = 2.5.5.5 (String(IA5))
+ATTg = 2.5.5.6 (String(Numeric))
+ATTh = 2.5.5.7 (DN-Binary)
+ATTi = 2.5.5.8 (Boolean)
+ATTj = 2.5.5.9 (Integer)
+ATTk = 2.5.5.10 (String(Octet))
+ATTl = 2.5.5.11 (Time)
+ATTm = 2.5.5.12 (String(Unicode))
+ATTn = 2.5.5.13 (Object(Presentation-Address))
+ATTo = 2.5.5.14 (Object(DN-String))
+ATTp = 2.5.5.15 (String(NT-Sec-Desc))
+ATTq = 2.5.5.16 (LargeInteger)
+ATTr = 2.5.5.17 (Sid)
