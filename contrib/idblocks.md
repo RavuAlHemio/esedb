@@ -114,3 +114,58 @@ An attribute 1681588644 (0x643B01A4) would then have the OID 1.3.6.1.4.1.34195.1
 an attribute 1446838341 (0x563D0045) would have the OID 1.3.6.1.4.1.34195.1.420.69.
 
 The loading logic is in `ntdsai.dll` in a function named `InitPrefixTable2`.
+
+### Large final arc
+
+For large final arcs, the final arc may be split between the prefix and the attribute ID. In this
+case, the topmost bit of the attribute ID within the arc is set to 1.
+
+For example, to encode an attribute with the OID 1.3.6.1.4.1.34195.1.696969.69696969, we first
+calculate its BER encoding:
+
+| OID                                 | BER encoding                                    |
+| ----------------------------------- | ----------------------------------------------- |
+| 1.3.6.1.4.1.34195.1.696969.69696969 | 2B 06 01 04 01 82 8B 13 01 AA C5 09 A1 9D FB 49 |
+
+We split off the two final bytes and turn them into a subtree:
+
+| encoding   | OID subtree                           | BER-encoded subtree                       |
+| ---------- | ------------------------------------- | ----------------------------------------- |
+| 0x2CE6xxxx | 1.3.6.1.4.1.34195.1.696969.(≥ 544384) | 2B 06 01 04 01 82 8B 13 01 AA C5 09 A1 9D |
+
+(0x2CE6 was chosen randomly for this example.)
+
+The remaining two BER bytes, FB 49, have the following structure:
+
+```plain
+1111_1011 0100_1001
+cddd_dddd cddd_dddd
+```
+
+where `c` is a continuation bit and `d` is an actual data bit.
+
+Dropping the continuation bits, we obtain:
+
+```
+x111_1011 x100_1001
+xaaa_aaaa xbbb_bbbb
+
+  11_1101 1100_1001
+  aa_aaaa abbb_bbbb
+
+0011_1101_1100_1001
+00aa_aaaa_abbb_bbbb
+```
+
+which is the value 0x3DC9.
+
+Finally, to mark that the attribute does not encode the full final arc, we set the topmost bit:
+
+```
+1011_1101_1100_1001
+m0aa_aaaa_abbb_bbbb
+```
+
+which is the value 0xBDC9.
+
+This means that our attribute ID is 0x2CE6_BDC9.
